@@ -11,6 +11,8 @@ Claude Code, Codex CLI and Cursor Agent.
 - keep workflow control flow in TypeScript rather than adding a configuration format
 - preserve conservative Git cleanup and bookmark jj work before forgetting a workspace
 - use Conventional Commit messages
+- publish GitHub releases through `.github/workflows/publish.yml`; npm trusts that
+  workflow through OIDC, so do not add an npm token secret
 
 ## Architecture
 
