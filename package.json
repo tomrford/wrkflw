@@ -1,0 +1,63 @@
+{
+  "name": "wrkflw",
+  "version": "0.0.0",
+  "private": true,
+  "type": "module",
+  "description": "Code-first orchestration across local and SSH coding-agent CLIs",
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/tomrford/wrkflw.git"
+  },
+  "homepage": "https://github.com/tomrford/wrkflw#readme",
+  "bugs": "https://github.com/tomrford/wrkflw/issues",
+  "keywords": [
+    "agents",
+    "claude-code",
+    "codex",
+    "cursor",
+    "orchestration",
+    "workflow"
+  ],
+  "bin": {
+    "wrkflw": "dist/cli.js"
+  },
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.js"
+    }
+  },
+  "files": [
+    "dist",
+    "README.md"
+  ],
+  "scripts": {
+    "build": "tsc -p tsconfig.build.json",
+    "check": "pnpm run format:check && pnpm run lint && pnpm run typecheck && pnpm run test && pnpm run docs:check && pnpm run build",
+    "docs:check": "tsx scripts/check-docs.ts",
+    "format": "biome format --write .",
+    "format:check": "biome format .",
+    "lint": "biome lint .",
+    "test": "tsx --test test/**/*.test.ts",
+    "typecheck": "tsc --noEmit"
+  },
+  "engines": {
+    "node": ">=22"
+  },
+  "packageManager": "pnpm@11.9.0",
+  "dependencies": {
+    "@tanstack/ai": "0.39.1",
+    "@tanstack/ai-acp": "0.2.0",
+    "@tanstack/ai-claude-code": "0.2.0",
+    "@tanstack/ai-codex": "0.2.0",
+    "@tanstack/ai-sandbox": "0.2.1",
+    "@tanstack/ai-sandbox-local-process": "0.2.0",
+    "tsx": "4.23.0"
+  },
+  "devDependencies": {
+    "@biomejs/biome": "2.5.2",
+    "@types/node": "26.1.0",
+    "typescript": "6.0.3"
+  }
+}
