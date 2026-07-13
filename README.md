@@ -8,6 +8,14 @@ Version 1 supports Claude Code, Codex CLI and Cursor Agent through ACP. Models a
 always exact strings such as `claude-haiku-4-5` or `gpt-5.6-luna`. The harness,
 reasoning level and execution target are separate properties.
 
+## Install
+
+Wrkflw requires Node.js 22 or newer:
+
+```text
+pnpm add --global wrkflw
+```
+
 ## Run a workflow
 
 A workflow is normal TypeScript. There is no workflow YAML or JSON.

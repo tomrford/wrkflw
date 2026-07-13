@@ -1,7 +1,6 @@
 {
   "name": "wrkflw",
-  "version": "0.0.0",
-  "private": true,
+  "version": "1.2.0",
   "type": "module",
   "description": "Code-first orchestration across local and SSH coding-agent CLIs",
   "license": "MIT",
@@ -32,6 +31,9 @@
     "dist",
     "README.md"
   ],
+  "publishConfig": {
+    "access": "public"
+  },
   "scripts": {
     "build": "tsc -p tsconfig.build.json",
     "check": "pnpm run format:check && pnpm run lint && pnpm run typecheck && pnpm run test && pnpm run docs:check && pnpm run build",
@@ -39,6 +41,7 @@
     "format": "biome format --write .",
     "format:check": "biome format .",
     "lint": "biome lint .",
+    "prepack": "pnpm run build",
     "test": "tsx --test test/**/*.test.ts",
     "typecheck": "tsc --noEmit"
   },
