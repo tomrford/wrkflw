@@ -19,32 +19,60 @@ child started by that workflow.
 There is no permanent central daemon. Each run has an independent PID and lifetime.
 One blocked or failed workflow does not stop another run.
 
-The worker stores:
+The worker creates and stores:
 
-- `run.json` as an atomic current-state snapshot
-- `events.ndjson` as the raw lifecycle and harness stream
-- `transcript.ndjson` as normalised searchable conversation entries
+- `summary.json` as an atomic current-state snapshot
+- `journal.ndjson` as the canonical ordered event and transcript stream
 - `worker.stdout.log` and `worker.stderr.log`
 
-The launcher writes the initial queued record before the worker exists. After spawn,
-the worker is the only process that writes run state, events and transcripts. Harness
-children stream their output back to that worker and never write Wrkflw files.
-Inspection commands only read these files. After the run is terminal, `prune` may
-update its managed-workspace metadata.
+The launcher creates the run directory, connects the worker's logs and passes its
+bootstrap data through the environment. The worker removes that variable before it
+starts a harness and creates the initial summary itself. While the run is live, it is
+the only process that writes summary and journal records. Harness children stream
+their output back to the worker and never write Wrkflw files. A later explicit
+cleanup retry uses its own short-lived maintenance worker. Inspection commands always
+read the archive; there is no separate live status protocol.
 
 Commands accept a UUID or name. A name resolves to the newest matching record. Wrkflw
 rejects a new run when the same name is active, but you can reuse a name after it
 finishes.
 
+Launchers claim the active name with one atomic directory reservation outside the run
+archive. This closes the only cross-process race between simultaneous launch commands;
+it does not let launchers write workflow state or add VCS locks. The worker releases
+the reservation after terminal state is durable. A later launcher can recover a stale
+reservation by reconciling its run record.
+
 `info` compares non-terminal state with the worker PID. If the worker disappeared
-without recording a terminal state, it reports a derived failed view without writing
-over the worker's record. `stop` sends `SIGTERM`; the worker records `stopping`, aborts
-active harness streams and records the terminal state.
+without recording a terminal state, it reports a derived `crashed` view without
+writing over the worker's last coherent record. `stop` sends `SIGTERM`; the worker
+records `stopping`, aborts active harness streams and records the terminal state.
 
-## Transcript and event model
+Before writing the terminal event and summary, the worker cleans up every managed
+workspace it created. Cleanup outcomes enter the journal. Dirty Git worktrees and
+unpushed or unmerged Git branches are retained and added to `summary.json` as
+warnings. jj workspaces are bookmarked when changed, forgotten and removed. Cleanup
+failure does not replace the workflow's own success or failure status.
 
-Wrkflw keeps raw AG-UI chunks for complete debugging. It also extracts useful content
-into ordered transcript entries:
+`cleanup` starts a short-lived maintenance worker for a terminal run. It retries
+workspace teardown after retained work is committed, pushed or integrated, and marks
+the related warnings resolved. It can also canonicalise a derived crash record before
+cleaning workspaces left by a hard worker exit. `cleanup --force` is the separate,
+explicit path for discarding a dirty Git worktree. Canonicalising a hard crash also
+records when it was observed.
+
+Completed archives remain in place for inspection. `history prune` removes terminal
+archives as a separate retention operation. Bulk pruning requires an age, and
+archives with unresolved warnings require `--force`. History pruning still refuses
+an archive that points to a managed workspace requiring cleanup, so it cannot erase
+the only record of retained work. Age-based bulk pruning also retains a derived crash
+until `cleanup` establishes its terminal timestamp.
+
+## Journal model
+
+Every append to `journal.ndjson` receives one run-global sequence number. The stream
+contains Wrkflw lifecycle events, raw AG-UI chunks and normalised transcript entries.
+The transcript projection includes:
 
 - system and user prompts
 - assistant text deltas
@@ -53,9 +81,11 @@ into ordered transcript entries:
 - tool results
 - run errors
 
-`transcript` filters entries by agent, kind and sequence range. `search` searches entry
-content and stored tool data in one run or all runs. The raw event log remains the
-source for protocol-level inspection.
+`journal` reads the complete stream. `events` and `transcript` are filtered projections
+of that same file. `transcript` filters by agent, kind and sequence range. `search`
+searches entry content and stored tool data in one run or all runs. `follow` tails the
+same journal that later inspection reads, advancing by byte offset rather than
+reparsing prior entries.
 
 ## Managed repository isolation
 
@@ -79,12 +109,13 @@ Managed paths have this shape on the selected machine:
 
 The source hash prevents repositories with the same basename from colliding. The run
 ID prevents reused run names from colliding. A managed workspace record includes its
-target and managed root, so pruning uses the same machine and path boundary.
+target and managed root, so cleanup uses the same machine and path boundary.
 
 For Git, Wrkflw creates and locks a worktree at `HEAD` or the requested revision. It
 creates a unique `wrkflw/...` branch so agent commits remain reachable after workspace
-pruning. Safe pruning refuses uncommitted changes. It removes a branch only when
-`git branch -d` considers that safe.
+cleanup. Safe cleanup refuses to remove a worktree with uncommitted changes. It
+removes a branch when Git considers that safe, or when all commits are recorded on
+its upstream. Otherwise it retains the branch and records a warning.
 
 Wrkflw does not add repository mutexes around these commands. Git and jj provide their
 own concurrency handling; Wrkflw reports any command failure they return.
@@ -92,13 +123,13 @@ own concurrency handling; Wrkflw reports any command failure they return.
 For jj, Wrkflw uses `jj workspace add --name`. It records the initial working-copy
 commit ID. The empty management commit disables signing so workspace creation does not
 need an interactive signing key. Agent commands keep the repository's normal signing
-policy. Pruning first sets a `wrkflw/...` bookmark, which snapshots the workspace. It
+policy. Cleanup first sets a `wrkflw/...` bookmark, which snapshots the workspace. It
 retains the bookmark when the revision changed and removes it when nothing changed.
 It then uses `jj workspace forget` to remove the live workspace reference and removes
 the owned directory.
 
-`--force` only applies to paths contained by the configured Wrkflw worktree root.
-Wrkflw refuses to prune active runs or paths outside that root.
+Wrkflw only removes paths contained by the configured worktree root. It does not
+force automatic Git cleanup; retained work is reported in the run archive.
 
 ## Workflow execution
 
@@ -142,7 +173,7 @@ The remote machine does not run Wrkflw. It needs:
 - the requested agent CLI on the login PATH
 - that CLI's authenticated subscription session
 
-Workspace creation, inspection and pruning use short-lived SSH commands. Remote
+Workspace creation, inspection and cleanup use short-lived SSH commands. Remote
 workspaces live under `~/.wrkflw/worktrees` unless the remote login environment sets
 `WRKFLW_HOME`. Run state and transcripts remain on the machine that started Wrkflw.
 

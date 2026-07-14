@@ -65,7 +65,7 @@ export interface ManagedWorkspace {
   sourceRoot: string
   managedRoot: string
   name: string
-  status: 'active' | 'pruned'
+  status: 'active' | 'retained' | 'pruned'
   createdAt: string
   prunedAt?: string
   branch?: string
@@ -131,10 +131,10 @@ export interface WorkflowContext {
 export type Workflow = (context: WorkflowContext) => Promise<unknown> | unknown
 
 export type RunStatus =
-  | 'queued'
   | 'running'
   | 'succeeded'
   | 'failed'
+  | 'crashed'
   | 'stopping'
   | 'stopped'
 
@@ -156,6 +156,16 @@ export interface AgentState {
   eventCount: number
 }
 
+export interface RunWarning {
+  code: string
+  message: string
+  at: string
+  agentId?: string
+  target?: Target
+  path?: string
+  resolvedAt?: string
+}
+
 export interface RunRecord {
   id: string
   name: string
@@ -169,6 +179,16 @@ export interface RunRecord {
   finishedAt?: string
   error?: string
   agents: Record<string, AgentState>
+  warnings: Array<RunWarning>
+}
+
+export interface RunBootstrap {
+  id: string
+  name: string
+  workflow: string
+  cwd: string
+  args: Array<string>
+  createdAt: string
 }
 
 export interface RunEvent {
@@ -201,3 +221,10 @@ export interface TranscriptEntry {
   messageId?: string
   data?: unknown
 }
+
+export type JournalEntry =
+  | (RunEvent & { channel: 'event' })
+  | (Omit<TranscriptEntry, 'kind'> & {
+      channel: 'transcript'
+      transcriptKind: TranscriptKind
+    })

@@ -1,30 +1,37 @@
 import { spawn } from 'node:child_process'
 import { closeSync, openSync } from 'node:fs'
-import { access } from 'node:fs/promises'
+import { access, readFile } from 'node:fs/promises'
 import { isAbsolute, resolve } from 'node:path'
 import { RunStore, runDirectory } from './store.js'
-import type { RunRecord } from './types.js'
+import type { RunBootstrap, RunRecord } from './types.js'
 
-const TERMINAL = new Set(['succeeded', 'failed', 'stopped'])
-const QUEUED_WITHOUT_PID_GRACE_MS = 5_000
+const TERMINAL = new Set(['succeeded', 'failed', 'crashed', 'stopped'])
+const WORKER_START_TIMEOUT_MS = 30_000
+
+function sleep(milliseconds: number): Promise<void> {
+  return new Promise((resolveSleep) => setTimeout(resolveSleep, milliseconds))
+}
+
+async function waitForProcessExit(
+  pid: number | undefined,
+  timeoutMilliseconds: number,
+): Promise<boolean> {
+  const deadline = Date.now() + timeoutMilliseconds
+  while (processIsAlive(pid) && Date.now() < deadline) await sleep(50)
+  return !processIsAlive(pid)
+}
 
 export function reconcileRun(record: RunRecord): RunRecord {
   if (TERMINAL.has(record.status)) return record
-  const missingWorker =
-    (record.pid !== undefined && !processIsAlive(record.pid)) ||
-    (record.pid === undefined &&
-      record.status === 'queued' &&
-      Date.now() - Date.parse(record.createdAt) >= QUEUED_WITHOUT_PID_GRACE_MS)
+  const missingWorker = !processIsAlive(record.pid)
   const stoppedWithoutWorker = record.status === 'stopping' && record.pid === undefined
   if (!missingWorker && !stoppedWithoutWorker) return record
 
   const stopped = record.status === 'stopping'
-  const finishedAt = new Date().toISOString()
   const message = 'Workflow worker exited without recording a terminal state'
   const reconciled: RunRecord = {
     ...record,
-    status: stopped ? 'stopped' : 'failed',
-    finishedAt,
+    status: stopped ? 'stopped' : 'crashed',
     agents: Object.fromEntries(
       Object.entries(record.agents).map(([id, agent]) => [id, { ...agent }]),
     ),
@@ -33,7 +40,6 @@ export function reconcileRun(record: RunRecord): RunRecord {
   for (const agent of Object.values(reconciled.agents)) {
     if (agent.status !== 'queued' && agent.status !== 'running') continue
     agent.status = stopped ? 'stopped' : 'failed'
-    agent.finishedAt = finishedAt
     if (!stopped) agent.error = message
   }
   return reconciled
@@ -48,6 +54,7 @@ export async function reconcileRuns(
 }
 
 export async function startRun(options: {
+  id: string
   name: string
   workflow: string
   args: Array<string>
@@ -59,40 +66,78 @@ export async function startRun(options: {
     ? options.workflow
     : resolve(options.cwd, options.workflow)
   await access(workflow)
-  const id = store.newId()
-  const record: RunRecord = {
+  const id = options.id
+  const bootstrap: RunBootstrap = {
     id,
     name: options.name,
     workflow,
     cwd: options.cwd,
     args: options.args,
-    status: 'queued',
     createdAt: new Date().toISOString(),
-    agents: {},
   }
-  await store.create(record)
+  await store.prepare(id)
 
   const stdout = openSync(`${runDirectory(id)}/worker.stdout.log`, 'a')
   const stderr = openSync(`${runDirectory(id)}/worker.stderr.log`, 'a')
   const child = spawn(process.execPath, [options.cliPath, '_worker', id], {
     cwd: options.cwd,
     detached: true,
-    env: process.env,
+    env: {
+      ...process.env,
+      WRKFLW_RUN_BOOTSTRAP: JSON.stringify(bootstrap),
+    },
     stdio: ['ignore', stdout, stderr],
   })
   closeSync(stdout)
   closeSync(stderr)
-  child.once('error', (error) => {
-    void store.update(id, (current) => {
-      if (current.status !== 'queued') return
-      current.status = 'failed'
-      current.finishedAt = new Date().toISOString()
-      current.error = `Cannot start workflow worker: ${error.message}`
+  try {
+    await new Promise<void>((resolveSpawn, rejectSpawn) => {
+      child.once('spawn', resolveSpawn)
+      child.once('error', rejectSpawn)
     })
-  })
+  } catch (error) {
+    await store.remove(id)
+    throw error
+  }
   child.unref()
 
-  return child.pid === undefined ? record : { ...record, pid: child.pid }
+  const deadline = Date.now() + WORKER_START_TIMEOUT_MS
+  while (Date.now() < deadline) {
+    try {
+      return await store.get(id)
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error
+      if (!processIsAlive(child.pid)) {
+        const stderr = await readFile(`${runDirectory(id)}/worker.stderr.log`, 'utf8')
+        await store.remove(id)
+        const detail = stderr.trim()
+        throw new Error(
+          `Workflow worker exited before creating archive ${id}${detail ? `: ${detail}` : ''}`,
+        )
+      }
+      await sleep(50)
+    }
+  }
+  if (child.pid !== undefined) {
+    try {
+      process.kill(child.pid, 'SIGTERM')
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code !== 'ESRCH') throw error
+    }
+  }
+  if (!(await waitForProcessExit(child.pid, 5_000)) && child.pid !== undefined) {
+    try {
+      process.kill(child.pid, 'SIGKILL')
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code !== 'ESRCH') throw error
+    }
+    await waitForProcessExit(child.pid, 5_000)
+  }
+  if (processIsAlive(child.pid)) {
+    throw new Error(`Timed out waiting for workflow worker ${id} to stop`)
+  }
+  await store.remove(id)
+  throw new Error(`Timed out waiting for workflow worker ${id}`)
 }
 
 export function processIsAlive(pid: number | undefined): boolean {
@@ -108,7 +153,7 @@ export function processIsAlive(pid: number | undefined): boolean {
 export async function stopRun(runId: string): Promise<RunRecord> {
   const store = new RunStore()
   const record = reconcileRun(await store.get(runId))
-  if (record.status !== 'queued' && record.status !== 'running') return record
+  if (record.status !== 'running') return record
   const stopping: RunRecord = { ...record, status: 'stopping' }
   if (record.pid !== undefined) {
     try {

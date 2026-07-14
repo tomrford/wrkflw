@@ -17,7 +17,12 @@ Claude Code, Codex CLI and Cursor Agent.
 ## Architecture
 
 - each named run owns one detached worker; there is no permanent daemon
-- after bootstrap, that worker is the sole writer of its state, events and transcripts
+- the live run worker creates and solely writes `summary.json` and `journal.ndjson`
+- all live and historical inspection reads the same run archive
+- the worker cleans managed workspaces before recording the terminal state
+- terminal cleanup retries run in a short-lived maintenance worker
+- history pruning must never erase the only pointer to a retained workspace
+- active names use an atomic reservation; do not add general state or VCS locks
 - `Location` selects the machine, directory and optional managed workspace
 - SSH targets use short-lived OpenSSH processes and need no remote Wrkflw install
 - transcripts are normalised for search while raw AG-UI events remain available

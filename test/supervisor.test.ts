@@ -7,7 +7,7 @@ import { RunStore } from '../src/store.js'
 import { reconcileRun } from '../src/supervisor.js'
 import type { RunRecord } from '../src/types.js'
 
-test('reconciles a queued run whose worker never acquired a pid', async () => {
+test('reconciles a running run whose worker disappeared', async () => {
   const previous = process.env.WRKFLW_STATE_DIR
   const state = await mkdtemp(join(tmpdir(), 'wrkflw-supervisor-'))
   process.env.WRKFLW_STATE_DIR = state
@@ -19,7 +19,8 @@ test('reconciles a queued run whose worker never acquired a pid', async () => {
       workflow: '/tmp/workflow.ts',
       cwd: '/tmp',
       args: [],
-      status: 'queued',
+      pid: 2_147_483_647,
+      status: 'running',
       createdAt: '2026-01-01T00:00:00.000Z',
       agents: {
         review: {
@@ -33,15 +34,16 @@ test('reconciles a queued run whose worker never acquired a pid', async () => {
           eventCount: 0,
         },
       },
+      warnings: [],
     }
     await store.create(record)
 
     const reconciled = reconcileRun(record)
 
-    assert.equal(reconciled.status, 'failed')
+    assert.equal(reconciled.status, 'crashed')
     assert.equal(reconciled.agents.review?.status, 'failed')
     assert.match(reconciled.error ?? '', /worker exited/)
-    assert.equal((await store.get(record.id)).status, 'queued')
+    assert.equal((await store.get(record.id)).status, 'running')
   } finally {
     if (previous === undefined) delete process.env.WRKFLW_STATE_DIR
     else process.env.WRKFLW_STATE_DIR = previous

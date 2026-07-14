@@ -25,6 +25,7 @@ export interface PruneResult {
   pruned: boolean
   reason?: string
   branch?: string
+  branchRetained?: boolean
   bookmark?: string
   finalRevision?: string
 }
@@ -372,24 +373,90 @@ async function pruneManagedWorkspaceUnlocked(
       )
       assertCommandSuccess(remove, `Cannot remove Git worktree ${workspace.path}`)
     }
-    await executeTarget(
+    const prune = await executeTarget(
       'git',
       ['-C', workspace.sourceRoot, 'worktree', 'prune'],
       undefined,
       workspace.target,
     )
+    assertCommandSuccess(prune, `Cannot prune Git worktrees in ${workspace.sourceRoot}`)
+    let branchRetained = false
+    let reason: string | undefined
     if (workspace.branch !== undefined) {
-      await executeTarget(
+      const exists = await executeTarget(
+        'git',
+        [
+          '-C',
+          workspace.sourceRoot,
+          'show-ref',
+          '--verify',
+          '--quiet',
+          `refs/heads/${workspace.branch}`,
+        ],
+        undefined,
+        workspace.target,
+      )
+      const remove = await executeTarget(
         'git',
         ['-C', workspace.sourceRoot, 'branch', '-d', workspace.branch],
         undefined,
         workspace.target,
       )
+      if (exists.exitCode === 0 && remove.exitCode !== 0) {
+        const upstream = await executeTarget(
+          'git',
+          [
+            '-C',
+            workspace.sourceRoot,
+            'rev-parse',
+            '--verify',
+            `${workspace.branch}@{upstream}`,
+          ],
+          undefined,
+          workspace.target,
+        )
+        const pushed =
+          upstream.exitCode === 0
+            ? await executeTarget(
+                'git',
+                [
+                  '-C',
+                  workspace.sourceRoot,
+                  'merge-base',
+                  '--is-ancestor',
+                  workspace.branch,
+                  upstream.stdout.trim(),
+                ],
+                undefined,
+                workspace.target,
+              )
+            : undefined
+        if (pushed?.exitCode === 0) {
+          const forceDelete = await executeTarget(
+            'git',
+            ['-C', workspace.sourceRoot, 'branch', '-D', workspace.branch],
+            undefined,
+            workspace.target,
+          )
+          assertCommandSuccess(
+            forceDelete,
+            `Cannot remove pushed Git branch ${workspace.branch}`,
+          )
+        } else {
+          branchRetained = true
+          const detail = remove.stderr.trim()
+          reason = detail
+            ? `Git retained branch ${workspace.branch}: ${detail}`
+            : `Git branch ${workspace.branch} has commits that are not merged or recorded on its upstream`
+        }
+      }
     }
     return {
       path: workspace.path,
       pruned: true,
       ...(workspace.branch === undefined ? {} : { branch: workspace.branch }),
+      ...(branchRetained ? { branchRetained } : {}),
+      ...(reason === undefined ? {} : { reason }),
     }
   }
 

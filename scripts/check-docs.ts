@@ -15,4 +15,6 @@ assert.ok(
 )
 assert.ok(readme.includes('docs/architecture.md'), 'README must link architecture')
 assert.match(architecture, /no permanent central daemon/i)
+assert.match(architecture, /journal\.ndjson/)
+assert.match(architecture, /history prune/)
 assert.match(architecture, /jj\s+workspace forget/)

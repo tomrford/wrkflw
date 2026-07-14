@@ -75,30 +75,38 @@ wrkflw run review.workflow.ts review-pr-123 -- 123 --deep
 
 Here, `review-pr-123` is the run name. The workflow receives `123` and `--deep`.
 
-## Inspect a live run
+## Inspect a run
 
-Each run has one detached worker, UUID, name, state file, transcript and event log.
-There is no permanent central daemon. You can run and inspect several workflows at
-the same time. After its initial queued record is created, that worker is the sole
-writer for the run. Harness processes stream back to it; monitoring commands only
-read its files.
+Each run has one detached worker, UUID, name and file-backed archive. There is no
+permanent central daemon. You can run and inspect several workflows at the same time.
+The worker creates and writes its archive; harness processes only stream back to it.
+Every inspection command reads the same files whether the run is live, succeeded,
+failed or crashed.
 
 ```text
 wrkflw list
 wrkflw info review-main
 wrkflw info review-main --agent implementation
 wrkflw follow review-main --detail summary
+wrkflw journal review-main --after 20
 wrkflw events review-main --agent implementation --after 20
 ```
 
 Names resolve to the newest matching run. UUIDs remain available for exact historical
-lookup.
+lookup. A completed run remains fully inspectable until its archive is pruned.
+
+Each archive under `~/.wrkflw/state/runs/<uuid>` contains:
+
+- `summary.json`, an atomic current snapshot
+- `journal.ndjson`, the canonical ordered stream of lifecycle events, prompts,
+  responses, reasoning, tools and errors
+- `worker.stdout.log` and `worker.stderr.log`
 
 ## Read and search transcripts
 
-Wrkflw records normalised transcript entries alongside raw TanStack AG-UI events.
-Entries include system and user prompts, assistant text, reasoning, tool calls, tool
-results and errors.
+Wrkflw records normalised transcript entries and raw TanStack AG-UI events in the
+same journal. Entries include system and user prompts, assistant text, reasoning,
+tool calls, tool results and errors.
 
 ```text
 wrkflw transcript review-main --agent implementation
@@ -109,7 +117,8 @@ wrkflw search --all "model_reasoning_effort" --kind tool
 ```
 
 JSON is the default for agent callers. `follow` emits NDJSON so a caller can process
-events while the run is active.
+the journal while the run is active. `journal` exposes the same ordered records after
+the run ends.
 
 ## Reuse locations
 
@@ -169,25 +178,50 @@ agent run. Git worktrees use Git's own `worktree add --lock` retention flag and 
 `wrkflw/...` branches. jj workspaces use unique native workspace names. Wrkflw adds no
 repository mutex around either VCS.
 
-Prune managed workspaces after inspecting or integrating their work:
+The run worker cleans up managed workspaces before it records the terminal workflow
+event. It removes clean Git worktrees automatically. A worktree with uncommitted
+changes remains in place, and a branch with commits that are neither merged nor
+recorded on its upstream remains in the source repository. Both cases add a warning
+to the run archive without hiding the workflow result.
+
+After preserving or integrating retained work, retry cleanup by name or UUID:
 
 ```text
-wrkflw prune review-main
-wrkflw prune
+wrkflw cleanup review-main
 ```
 
-Safe pruning only processes terminal runs. It retains Git worktrees with uncommitted
-changes unless you pass `--force`. Git branches with unmerged commits remain in the
-source repository.
+This also handles workspaces left by a worker that crashed before teardown. Cleanup
+marks related warnings resolved. `cleanup --force` explicitly permits deletion of a
+dirty Git worktree; normal cleanup never discards it.
 
-Wrkflw sets a `wrkflw/...` bookmark before pruning a jj workspace. Setting the
+Wrkflw sets a `wrkflw/...` bookmark before removing a jj workspace. Setting the
 bookmark snapshots the working copy. If the revision changed, Wrkflw retains the
 bookmark before forgetting and removing the workspace. If it did not change, Wrkflw
-removes the temporary bookmark.
+removes the temporary bookmark. This lets jj workspaces be removed even when their
+working-copy revision contains changes.
 
-SSH locations use the same lifecycle over batch SSH. Wrkflw creates workspaces under
-`~/.wrkflw/worktrees` on the remote machine and records enough target information to
-prune them later. The remote machine does not run a Wrkflw service.
+SSH locations use the same lifecycle over batch SSH. Wrkflw creates and cleans up
+workspaces under `~/.wrkflw/worktrees` on the remote machine. The remote machine does
+not run a Wrkflw service.
+
+## Retain or remove run history
+
+Run archives persist after completion so later inspection uses the same commands and
+data as live monitoring. Prune one archive by name or UUID, or prune old archives in
+bulk:
+
+```text
+wrkflw history prune review-main
+wrkflw history prune --older-than 30d
+```
+
+Bulk pruning requires `--older-than`; supported units are `m`, `h`, `d` and `w`.
+Wrkflw never removes an active run or an archive that still points to a managed
+workspace requiring cleanup. It also retains archives with unresolved warnings unless
+`--force` explicitly discards that record. `history prune --force` does not remove a
+workspace; use the separate `cleanup --force` command when discarding one is intended.
+Age-based bulk pruning also keeps a hard-crashed run until `cleanup` records when the
+crash was observed.
 
 ## Transfer context between turns
 
@@ -307,8 +341,8 @@ wrkflw skill preflight
 wrkflw skill monitoring
 ```
 
-State defaults to `~/.wrkflw/state`. Set `WRKFLW_HOME` to move managed worktrees or
-`WRKFLW_STATE_DIR` to move run state.
+Archives default to `~/.wrkflw/state`. Set `WRKFLW_HOME` to move managed worktrees or
+`WRKFLW_STATE_DIR` to move run archives.
 
 [Wrkflw architecture](docs/architecture.md) defines the process, workspace, transcript
 and authentication boundaries.

@@ -40,10 +40,10 @@ const topics = {
   overview: `# Wrkflw
 
 Wrkflw runs named TypeScript workflows under detached local workers. Each worker owns
-its agent processes, state, transcript and event log. Several runs can operate and be
-inspected independently. Remote targets need SSH, the requested CLI and its own login.
-They need no Wrkflw install or service. Harness processes stream output back to their
-worker; monitoring commands only read stored state.
+its agent processes and file-backed archive. Several runs can operate and be inspected
+independently, including after completion. Remote targets need SSH, the requested CLI
+and its own login. They need no Wrkflw install or service. Harness processes stream
+output back to their worker; monitoring commands only read the archive.
 
 Commands intended for agents:
 
@@ -52,13 +52,16 @@ Commands intended for agents:
 - \`wrkflw transcript <run> [filters]\` reads normalised conversation entries
 - \`wrkflw search <run> <query>\` searches one run
 - \`wrkflw search --all <query>\` searches every stored run
-- \`wrkflw follow <run> [--detail summary|events|raw]\` follows one run as NDJSON
+- \`wrkflw journal <run> [filters]\` reads the canonical ordered stream
+- \`wrkflw follow <run> [--detail summary|journal|raw]\` follows one run as NDJSON
 - \`wrkflw events <run> [--agent <id>] [--after <seq>]\` reads raw stored events
 - \`wrkflw stop <run>\` asks the detached worker to stop
-- \`wrkflw prune [run] [--force]\` prunes managed workspaces
+- \`wrkflw cleanup <run> [--force]\` retries retained workspace cleanup
+- \`wrkflw history prune [run] [--older-than <age>] [--force]\` removes archives
 - \`wrkflw skill [topic]\` prints this contract
 
 \`<run>\` accepts a run name or UUID. Names resolve to the newest matching run.
+Every inspection command reads the same archive whether the run is live or terminal.
 `,
   workflow: `# Workflow module
 
@@ -149,11 +152,16 @@ Git uses its own worktree retention lock and a unique \`wrkflw/...\` branch. jj 
 named native workspace. Wrkflw adds no repository mutex. Set \`worktreeRevision\` to
 choose a Git commit-ish or jj revset.
 
-\`wrkflw prune [run]\` only processes terminal runs. It retains dirty Git worktrees
-unless \`--force\` explicitly permits discarding them. Git branches with unmerged
-commits are retained. For jj, setting a temporary \`wrkflw/...\` bookmark snapshots the
-workspace. Wrkflw retains it when the revision changed, removes it when unchanged,
-then forgets and removes the workspace.
+The run worker cleans these workspaces before recording its terminal state. It
+retains dirty Git worktrees and Git branches whose commits are neither merged nor on
+their upstream, then records a run warning. For jj, setting a temporary
+\`wrkflw/...\` bookmark snapshots the workspace. Wrkflw retains it when the revision
+changed, removes it when unchanged, then forgets and removes the workspace.
+
+Run \`wrkflw cleanup <run>\` after committing, pushing or integrating retained Git
+work. It also cleans workspaces left by a crashed run and marks related warnings
+resolved. \`cleanup --force\` explicitly permits deletion of a dirty Git worktree.
+History pruning refuses while a managed workspace still requires cleanup.
 
 SSH locations use the same lifecycle over batch SSH. Wrkflw stores remote workspaces
 under \`~/.wrkflw/worktrees\` on that machine and needs no remote service.
@@ -205,7 +213,13 @@ statically discover arbitrary TypeScript control flow.
   monitoring: `# Monitoring and transcripts
 
 Use \`info\` for a compact snapshot. Add \`--agent <id>\` for one agent's state,
-workspace, session and completed result. Use \`follow\` while a run is active.
+workspace, session and completed result. Use \`follow\` while a run is active. Use
+the same commands after completion; they read the retained archive.
+
+Each archive contains atomic \`summary.json\`, canonical \`journal.ndjson\`, and the
+worker's stdout and stderr logs. \`journal\` supports \`--agent\`, \`--after\` and
+\`--limit\`. Its sequence numbers order lifecycle events and transcript entries in
+one stream.
 
 \`transcript\` supports \`--agent\`, \`--kind\`, \`--after\`, \`--before\`, \`--limit\`
 and \`--format json|text\`. Kinds are ${TRANSCRIPT_KINDS.map((kind) => `\`${kind}\``).join(', ')}.
@@ -218,10 +232,16 @@ results and errors as numbered entries.
 Follow detail levels:
 
 - \`summary\` emits workflow and agent lifecycle events
-- \`events\` emits every stored Wrkflw event, including TanStack AG-UI chunks
+- \`journal\` emits every stored event and transcript entry
 - \`raw\` emits the underlying AG-UI chunk for agent events
 
 Every line from \`follow\` is independent JSON.
+
+Completed archives persist until \`history prune\` removes them. Bulk pruning requires
+\`--older-than\` with an \`m\`, \`h\`, \`d\` or \`w\` unit. Active archives are never
+removed. Archives that still point to a managed workspace require \`cleanup\` first;
+other unresolved warnings require \`--force\`. Age-based pruning also keeps a derived
+hard crash until \`cleanup\` records its terminal timestamp.
 
 \`parallel([...])\` waits for every sibling to finish, then throws one aggregate error
 if any failed. Catch it to continue the workflow. \`settle([...])\` instead returns each

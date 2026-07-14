@@ -1,15 +1,23 @@
 #!/usr/bin/env node
+import { spawn } from 'node:child_process'
 import { readFile } from 'node:fs/promises'
 import { fileURLToPath } from 'node:url'
+import { cleanupRunWorkspaces } from './cleanup.js'
 import { renderSkill, skillTopics } from './skill.js'
 import { RunStore, runDirectory } from './store.js'
 import { reconcileRun, reconcileRuns, startRun, stopRun } from './supervisor.js'
 import { TRANSCRIPT_KINDS } from './types.js'
 import { runWorker } from './worker.js'
-import { pruneManagedWorkspace } from './workspaces.js'
-import type { RunEvent, RunRecord, TranscriptEntry, TranscriptKind } from './types.js'
+import type {
+  JournalEntry,
+  RunEvent,
+  RunRecord,
+  TranscriptEntry,
+  TranscriptKind,
+} from './types.js'
 
-const TERMINAL = new Set(['succeeded', 'failed', 'stopped'])
+const TERMINAL = new Set(['succeeded', 'failed', 'crashed', 'stopped'])
+const NAME_RESERVATION_GRACE_MS = 30_000
 
 function json(value: unknown): void {
   process.stdout.write(`${JSON.stringify(value, null, 2)}\n`)
@@ -70,6 +78,15 @@ function eventMatches(
   return true
 }
 
+function journalMatches(
+  entry: JournalEntry,
+  filters: { agent: string | undefined; after: number | undefined },
+): boolean {
+  if (filters.agent !== undefined && entry.agentId !== filters.agent) return false
+  if (filters.after !== undefined && entry.seq <= filters.after) return false
+  return true
+}
+
 function transcriptKind(args: Array<string>): TranscriptKind | undefined {
   const kind = option(args, '--kind')
   if (kind === undefined) return undefined
@@ -109,22 +126,35 @@ async function follow(
   detail: string,
   agent: string | undefined,
 ): Promise<void> {
-  if (!['summary', 'events', 'raw'].includes(detail)) {
-    throw new Error('--detail must be summary, events or raw')
+  if (!['summary', 'journal', 'raw'].includes(detail)) {
+    throw new Error('--detail must be summary, journal or raw')
   }
   const initial = await store.resolve(reference)
-  let cursor = 0
+  let offset = 0
+  let terminalObserved = false
   while (true) {
-    const events = await store.events(initial.id)
-    for (const event of events) {
-      if (!eventMatches(event, { agent, after: cursor })) continue
-      if (detail === 'summary' && event.type === 'agent.event') continue
-      if (detail === 'raw' && event.type === 'agent.event') jsonLine(event.data)
-      else jsonLine(event)
+    const chunk = await store.journalChunk(initial.id, offset)
+    for (const entry of chunk.entries) {
+      if (!journalMatches(entry, { agent, after: undefined })) continue
+      if (
+        detail === 'summary' &&
+        (entry.channel !== 'event' || entry.type === 'agent.event')
+      ) {
+        continue
+      }
+      if (detail === 'raw') {
+        if (entry.channel === 'event' && entry.type === 'agent.event') {
+          jsonLine(entry.data)
+        }
+        continue
+      }
+      jsonLine(entry)
     }
-    cursor = Math.max(cursor, events.at(-1)?.seq ?? 0)
+    offset = chunk.nextOffset
     const record = await reconciledRecord(store, initial.id)
-    if (TERMINAL.has(record.status) && cursor >= (events.at(-1)?.seq ?? 0)) return
+    const terminal = TERMINAL.has(record.status)
+    if (terminalObserved && terminal && chunk.entries.length === 0) return
+    terminalObserved ||= terminal
     await sleep(250)
   }
 }
@@ -135,23 +165,82 @@ async function info(
   agentId: string | undefined,
 ): Promise<void> {
   const record = await reconciledRecord(store, reference)
-  const transcript = await store.transcripts(record.id)
+  const journal = await store.journal(record.id)
+  const transcriptEntries = journal.filter((entry) => entry.channel === 'transcript')
   if (agentId === undefined) {
-    json({ ...record, transcriptEntries: transcript.length })
+    json({
+      ...record,
+      warningCount: record.warnings.filter((warning) => !warning.resolvedAt).length,
+      journalEntries: journal.length,
+      transcriptEntries: transcriptEntries.length,
+    })
     return
   }
   const state = record.agents[agentId]
   if (state === undefined) throw new Error(`Run ${record.name} has no agent ${agentId}`)
-  const completed = (await store.events(record.id))
-    .filter((event) => event.agentId === agentId && event.type === 'agent.completed')
+  const completed = journal
+    .filter(
+      (entry) =>
+        entry.channel === 'event' &&
+        entry.agentId === agentId &&
+        entry.type === 'agent.completed',
+    )
     .at(-1)
   json({
     runId: record.id,
     runName: record.name,
     ...state,
-    transcriptEntries: transcript.filter((entry) => entry.agentId === agentId).length,
+    transcriptEntries: transcriptEntries.filter((entry) => entry.agentId === agentId)
+      .length,
     ...(completed === undefined ? {} : { result: completed.data }),
   })
+}
+
+function durationMilliseconds(value: string): number {
+  const match = /^(\d+)(m|h|d|w)$/.exec(value)
+  if (match === null) throw new Error('--older-than must use m, h, d or w')
+  const count = Number(match[1])
+  const unit = match[2]
+  const factor =
+    unit === 'm'
+      ? 60_000
+      : unit === 'h'
+        ? 60 * 60_000
+        : unit === 'd'
+          ? 24 * 60 * 60_000
+          : 7 * 24 * 60 * 60_000
+  return count * factor
+}
+
+async function reserveRunName(
+  store: RunStore,
+  name: string,
+  id: string,
+): Promise<void> {
+  const reservation = { id, createdAt: new Date().toISOString() }
+  for (let attempt = 0; attempt < 3; attempt += 1) {
+    if (await store.reserveName(name, reservation)) return
+    const current = await store.nameReservation(name)
+    if (current === undefined) continue
+    let terminalReservation = false
+    if (current.id !== '') {
+      try {
+        const run = reconcileRun(await store.get(current.id))
+        if (!TERMINAL.has(run.status)) {
+          throw new Error(`Run ${JSON.stringify(name)} is already ${run.status}`)
+        }
+        terminalReservation = true
+      } catch (error) {
+        if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error
+      }
+    }
+    const age = Date.now() - Date.parse(current.createdAt)
+    if (!terminalReservation && age < NAME_RESERVATION_GRACE_MS) {
+      throw new Error(`Run ${JSON.stringify(name)} is already starting`)
+    }
+    await store.releaseName(name, current.id)
+  }
+  throw new Error(`Cannot reserve run name ${JSON.stringify(name)}`)
 }
 
 async function runCommand(args: Array<string>, cliPath: string): Promise<void> {
@@ -176,13 +265,22 @@ async function runCommand(args: Array<string>, cliPath: string): Promise<void> {
   if (active !== undefined) {
     throw new Error(`Run ${JSON.stringify(name)} is already ${active.status}`)
   }
-  const record = await startRun({
-    name,
-    workflow,
-    args: workflowArgs,
-    cwd: process.cwd(),
-    cliPath,
-  })
+  const id = store.newId()
+  await reserveRunName(store, name, id)
+  let record: RunRecord
+  try {
+    record = await startRun({
+      id,
+      name,
+      workflow,
+      args: workflowArgs,
+      cwd: process.cwd(),
+      cliPath,
+    })
+  } catch (error) {
+    await store.releaseName(name, id)
+    throw error
+  }
   if (!has(commandArgs, '--wait')) {
     json({
       runId: record.id,
@@ -258,15 +356,40 @@ async function searchCommand(store: RunStore, args: Array<string>): Promise<void
   json(matches.slice(-limit))
 }
 
-async function pruneCommand(store: RunStore, args: Array<string>): Promise<void> {
-  const reference = withoutOptions(args, [])[0]
-  const records =
-    reference === undefined
-      ? await reconcileRuns(store)
-      : await reconcileRuns(store, [await store.resolve(reference)])
+async function journalCommand(store: RunStore, args: Array<string>): Promise<void> {
+  const reference = args[0]
+  if (reference === undefined) throw new Error('Usage: wrkflw journal <run>')
+  const record = await store.resolve(reference)
+  const filters = {
+    agent: option(args, '--agent'),
+    after: numberOption(args, '--after'),
+  }
+  let entries = (await store.journal(record.id)).filter((entry) =>
+    journalMatches(entry, filters),
+  )
+  const limit = numberOption(args, '--limit', { minimum: 1 })
+  if (limit !== undefined) entries = entries.slice(-limit)
+  json(entries)
+}
+
+async function historyCommand(store: RunStore, args: Array<string>): Promise<void> {
+  if (args[0] !== 'prune') {
+    throw new Error('Usage: wrkflw history prune [run] [--older-than <age>]')
+  }
+  const positionals = withoutOptions(args.slice(1), ['--older-than'])
+  const reference = positionals[0]
+  const olderThan = option(args, '--older-than')
+  if (reference === undefined && olderThan === undefined) {
+    throw new Error('Bulk history pruning requires --older-than')
+  }
+  const cutoff =
+    olderThan === undefined ? undefined : Date.now() - durationMilliseconds(olderThan)
+  const storedRecords =
+    reference === undefined ? await store.list() : [await store.resolve(reference)]
   const force = has(args, '--force')
   const output: Array<Record<string, unknown>> = []
-  for (const record of records) {
+  for (const stored of storedRecords) {
+    const record = reconcileRun(stored)
     if (!TERMINAL.has(record.status)) {
       output.push({
         runId: record.id,
@@ -276,40 +399,102 @@ async function pruneCommand(store: RunStore, args: Array<string>): Promise<void>
       })
       continue
     }
-    for (const agent of Object.values(record.agents)) {
-      if (agent.workspace === undefined || agent.workspace.status === 'pruned') continue
-      let result: Awaited<ReturnType<typeof pruneManagedWorkspace>>
-      try {
-        result = await pruneManagedWorkspace(agent.workspace, force)
-      } catch (error) {
-        const reason = error instanceof Error ? error.message : String(error)
-        output.push({
-          runId: record.id,
-          name: record.name,
-          agentId: agent.id,
-          path: agent.workspace.path,
-          pruned: false,
-          reason,
-        })
-        process.exitCode = 1
-        continue
-      }
-      output.push({ runId: record.id, name: record.name, agentId: agent.id, ...result })
-      if (result.pruned) {
-        await store.update(record.id, (current) => {
-          const workspace = current.agents[agent.id]?.workspace
-          if (workspace === undefined) return
-          workspace.status = 'pruned'
-          workspace.prunedAt = new Date().toISOString()
-          if (result.bookmark !== undefined) workspace.bookmark = result.bookmark
-          if (result.finalRevision !== undefined) {
-            workspace.finalRevision = result.finalRevision
-          }
-        })
-      }
+    if (cutoff !== undefined && !TERMINAL.has(stored.status)) {
+      output.push({
+        runId: record.id,
+        name: record.name,
+        pruned: false,
+        reason: 'terminal time is unknown; run cleanup to canonicalise the crash',
+      })
+      continue
     }
+    const finishedAt = Date.parse(record.finishedAt ?? record.createdAt)
+    if (cutoff !== undefined && finishedAt > cutoff) {
+      output.push({
+        runId: record.id,
+        name: record.name,
+        pruned: false,
+        reason: 'run is newer than the retention cutoff',
+      })
+      continue
+    }
+    const retainedWorkspaces = Object.values(record.agents).filter(
+      (agent) => agent.workspace !== undefined && agent.workspace.status !== 'pruned',
+    )
+    if (retainedWorkspaces.length > 0) {
+      output.push({
+        runId: record.id,
+        name: record.name,
+        pruned: false,
+        reason: `${retainedWorkspaces.length} managed workspace${retainedWorkspaces.length === 1 ? '' : 's'} require cleanup`,
+      })
+      continue
+    }
+    const unresolved = record.warnings.filter((warning) => !warning.resolvedAt)
+    if (unresolved.length > 0 && !force) {
+      output.push({
+        runId: record.id,
+        name: record.name,
+        pruned: false,
+        reason: `${unresolved.length} unresolved warning${unresolved.length === 1 ? '' : 's'}`,
+      })
+      continue
+    }
+    await store.releaseName(record.name, record.id)
+    await store.remove(record.id)
+    output.push({ runId: record.id, name: record.name, pruned: true })
   }
   json(output)
+}
+
+async function cleanupCommand(
+  store: RunStore,
+  args: Array<string>,
+  cliPath: string,
+): Promise<void> {
+  const reference = withoutOptions(args, [])[0]
+  if (reference === undefined) throw new Error('Usage: wrkflw cleanup <run> [--force]')
+  const record = await reconciledRecord(store, reference)
+  if (!TERMINAL.has(record.status)) {
+    throw new Error(`Run ${record.name} is still ${record.status}`)
+  }
+  const child = spawn(
+    process.execPath,
+    [cliPath, '_cleanup', record.id, ...(has(args, '--force') ? ['--force'] : [])],
+    { cwd: process.cwd(), stdio: ['ignore', 'inherit', 'inherit'] },
+  )
+  const exitCode = await new Promise<number>((resolveExit, rejectExit) => {
+    child.once('error', rejectExit)
+    child.once('exit', (code) => resolveExit(code ?? 1))
+  })
+  if (exitCode !== 0) process.exitCode = exitCode
+}
+
+async function cleanupWorker(store: RunStore, args: Array<string>): Promise<void> {
+  const runId = args[0]
+  if (runId === undefined) throw new Error('Missing cleanup run id')
+  const stored = await store.get(runId)
+  const record = reconcileRun(stored)
+  if (!TERMINAL.has(record.status)) {
+    throw new Error(`Run ${record.name} is still ${record.status}`)
+  }
+  if (record.status !== stored.status) {
+    const finishedAt = new Date().toISOString()
+    record.finishedAt = finishedAt
+    for (const agent of Object.values(record.agents)) {
+      if (agent.finishedAt === undefined && agent.status !== 'queued') {
+        agent.finishedAt = finishedAt
+      }
+    }
+    await store.event(runId, {
+      type: record.status === 'crashed' ? 'workflow.crashed' : 'workflow.stopped',
+      data: { error: record.error },
+    })
+    await store.update(runId, () => record)
+  }
+  const warnings = await cleanupRunWorkspaces(store, runId, has(args, '--force'))
+  await store.releaseName(record.name, runId)
+  json({ run: await store.get(runId), cleanupWarnings: warnings })
 }
 
 function usage(): string {
@@ -322,11 +507,13 @@ Commands:
   transcript <run> [--agent <id>] [--kind <kind>] [--after <seq>] [--before <seq>] [--limit <n>] [--format json|text]
   search <run> <query> [--agent <id>] [--kind <kind>] [--limit <n>]
   search --all <query> [--agent <id>] [--kind <kind>] [--limit <n>]
+  journal <run> [--agent <agent-id>] [--after <seq>] [--limit <n>]
   events <run> [--agent <agent-id>] [--after <seq>] [--limit <n>]
-  follow <run> [--agent <agent-id>] [--detail summary|events|raw]
+  follow <run> [--agent <agent-id>] [--detail summary|journal|raw]
   logs <run> [--stream stdout|stderr]
   stop <run>
-  prune [run] [--force]
+  cleanup <run> [--force]
+  history prune [run] [--older-than <age>] [--force]
   skill [${skillTopics.join('|')}]
 `
 }
@@ -356,6 +543,9 @@ async function main(): Promise<void> {
       return
     case 'search':
       await searchCommand(store, args)
+      return
+    case 'journal':
+      await journalCommand(store, args)
       return
     case 'events': {
       const reference = args[0]
@@ -406,8 +596,11 @@ async function main(): Promise<void> {
       json(await stopRun(record.id))
       return
     }
-    case 'prune':
-      await pruneCommand(store, args)
+    case 'cleanup':
+      await cleanupCommand(store, args, cliPath)
+      return
+    case 'history':
+      await historyCommand(store, args)
       return
     case 'skill':
       process.stdout.write(`${renderSkill(args[0])}\n`)
@@ -418,6 +611,9 @@ async function main(): Promise<void> {
       await runWorker(runId)
       return
     }
+    case '_cleanup':
+      await cleanupWorker(store, args)
+      return
     case '--help':
     case '-h':
     case undefined:
