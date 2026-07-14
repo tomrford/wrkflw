@@ -3,6 +3,12 @@ name: Publish
 on:
   release:
     types: [published]
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: Release tag to publish
+        required: true
+        type: string
 
 permissions:
   contents: read
@@ -21,4 +27,8 @@ jobs:
           package-manager-cache: false
       - run: pnpm install --frozen-lockfile
       - run: pnpm check
-      - run: pnpm publish
+      - name: Validate release version
+        env:
+          RELEASE_TAG: ${{ github.event.release.tag_name || inputs.tag }}
+        run: test "$RELEASE_TAG" = "v$(node -p "require('./package.json').version")"
+      - run: pnpm publish --no-git-checks
