@@ -4,9 +4,9 @@ Wrkflw runs code-first workflows across local coding-agent CLIs. An agent writes
 TypeScript file, starts a named run and receives its state while it continues in a
 detached worker.
 
-Version 1 supports Claude Code, Codex CLI and Cursor Agent through ACP. Models are
-always exact strings such as `claude-haiku-4-5` or `gpt-5.6-luna`. The harness,
-reasoning level and execution target are separate properties.
+Wrkflw drives Claude Code and Codex through their native SDKs. Models are always
+exact strings such as `claude-haiku-4-5` or `gpt-5.6-luna`. The harness, reasoning
+level and execution target are separate properties.
 
 ## Install
 
@@ -104,9 +104,9 @@ Each archive under `~/.wrkflw/state/runs/<uuid>` contains:
 
 ## Read and search transcripts
 
-Wrkflw records normalised transcript entries and raw TanStack AG-UI events in the
-same journal. Entries include system and user prompts, assistant text, reasoning,
-tool calls, tool results and errors.
+Wrkflw records normalised transcript entries and raw native SDK events in the same
+journal. Entries include system and user prompts, assistant text, reasoning, tool
+calls, tool results and errors.
 
 ```text
 wrkflw transcript review-main --agent implementation
@@ -266,6 +266,36 @@ ${first.text}`,
 Separate named workflow runs do not inherit context automatically. Their state and
 transcripts remain available through the CLI.
 
+## Request structured output
+
+Pass a schema that implements Standard Schema and Standard JSON Schema. Zod 4 does,
+so the returned `output` is inferred without a separate result type:
+
+```ts
+import { z } from 'zod'
+
+const result = await run({
+  id: 'review',
+  harness: 'codex',
+  model: 'gpt-5.6-luna',
+  prompt: 'Review the repository and return the requested result.',
+  outputSchema: z.object({
+    summary: z.string(),
+    ready: z.boolean(),
+  }),
+})
+
+result.output.summary // string
+result.output.ready // boolean
+```
+
+Wrkflw converts the schema to JSON Schema for the native harness, then validates the
+completed value locally through Standard Schema. Invalid JSON or a schema mismatch
+fails the agent. The validated value is stored in the run summary and completed
+result; `text` remains available as the harness's raw final response. Structured
+output works for new and resumed Claude Code and Codex sessions, locally and over
+SSH.
+
 ## Check agents before starting
 
 Preflight the same agent specifications that the workflow will run:
@@ -316,12 +346,13 @@ location: {
 ```
 
 The remote machine does not need Wrkflw or a daemon. It needs batch SSH access, the
-requested directory, Git or jj for managed workspaces, the agent CLI on its
-non-interactive PATH and that CLI's own login. The SSH process carries ACP or native
-CLI streams back to the local worker.
+requested directory, Git or jj for managed workspaces, the agent CLI on its login
+PATH and that CLI's own login. The SSH process carries the native SDK stream back to
+the local worker.
 
-The local-process and SSH providers select where a process runs. They are not security
-containers. Wrkflw uses the installed TanStack adapter's permission defaults.
+Process location is not a security boundary. Claude Code runs with
+`bypassPermissions`; Codex runs with `approvalPolicy: 'never'` and its
+`workspace-write` sandbox. Use trusted workflows, targets and repositories.
 
 ## Use the agent contract
 

@@ -1,7 +1,7 @@
 # Wrkflw contributor guide
 
 Wrkflw is a TypeScript library and agent-first CLI for code-defined workflows across
-Claude Code, Codex CLI and Cursor Agent.
+Claude Code and Codex.
 
 ## Development
 
@@ -25,7 +25,7 @@ Claude Code, Codex CLI and Cursor Agent.
 - active names use an atomic reservation; do not add general state or VCS locks
 - `Location` selects the machine, directory and optional managed workspace
 - SSH targets use short-lived OpenSSH processes and need no remote Wrkflw install
-- transcripts are normalised for search while raw AG-UI events remain available
+- transcripts are normalised for search while raw native SDK events remain available
 - `wrkflw skill` is the agent-facing API contract
 
 ## Documentation

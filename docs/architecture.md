@@ -4,7 +4,7 @@ Wrkflw separates agent selection from location:
 
 - `model` is an exact model ID
 - `reasoning` maps to the selected CLI's reasoning control
-- `harness` selects Claude Code, Codex CLI or Cursor ACP
+- `harness` selects Claude Code or Codex
 - `location` groups the target machine, source directory and workspace policy
 
 The same model can be available through several harnesses. Wrkflw therefore does not
@@ -71,13 +71,14 @@ until `cleanup` establishes its terminal timestamp.
 ## Journal model
 
 Every append to `journal.ndjson` receives one run-global sequence number. The stream
-contains Wrkflw lifecycle events, raw AG-UI chunks and normalised transcript entries.
+contains Wrkflw lifecycle events, raw native SDK events and normalised transcript
+entries.
 The transcript projection includes:
 
 - system and user prompts
-- assistant text deltas
-- reasoning deltas
-- tool names and argument deltas
+- assistant text
+- reasoning
+- tool names and calls
 - tool results
 - run errors
 
@@ -145,10 +146,12 @@ target and `cwd`, workspace path, VCS kind, branch or workspace name and base re
 throws an aggregate error if any failed. The workflow may catch that error and
 continue. `settle` returns each fulfilled or rejected result without throwing.
 
-The result contains final text, a typed session handle and the resolved location. The
-session handle binds the native harness session ID to its harness, machine and
-directory. A later turn passes it as `resume`. Wrkflw rejects a different harness or
-location before resuming.
+The result contains final text, a typed session handle and the resolved location. An
+`outputSchema` implementing Standard Schema and Standard JSON Schema adds an inferred
+`output` value. Wrkflw converts it to JSON Schema for the native SDK and validates the
+completed value locally before archiving it. The session handle binds the native
+harness session ID to its harness, machine and directory. A later turn passes it as
+`resume`. Wrkflw rejects a different harness or location before resuming.
 
 Cross-harness steps transfer context through prompt text or files. Separate named runs
 retain searchable transcripts but do not inherit context automatically.
@@ -163,9 +166,11 @@ does not reproduce those controls in a configuration language.
 
 ## SSH boundary
 
-The SSH provider implements TanStack's process and file interface through the system
-`ssh` client in batch mode. Login-shell startup makes the remote CLI PATH available.
-ACP messages or native CLI streams use the SSH process's stdin, stdout and stderr.
+The native driver process boundary uses the system `ssh` client in batch mode.
+Login-shell startup makes the remote CLI PATH available. Claude's SDK receives a
+custom process spawner. Codex's SDK receives a short-lived local executable shim that
+copies any generated output-schema file to a remote temporary path and streams Codex
+JSONL through SSH. Neither path needs Wrkflw or Node.js on the remote machine.
 
 The remote machine does not run Wrkflw. It needs:
 
@@ -185,9 +190,11 @@ Each CLI uses its login on the machine where it runs. Wrkflw removes
 `ANTHROPIC_API_KEY`, `CODEX_API_KEY` and `OPENAI_API_KEY` from harness children so an
 inherited API key does not silently replace a subscription login.
 
-Wrkflw does not override TanStack harness permission or sandbox defaults. Local-process
-and SSH providers select a process location but do not isolate the host like a VM or
-container. Workflows must use trusted scripts, targets and repositories.
+Claude Code runs in `bypassPermissions` mode. Codex uses `approvalPolicy: 'never'`
+with its `workspace-write` sandbox. The SDKs load each CLI's normal user and project
+configuration, including skills and plugins discovered by that CLI. Process location
+does not isolate a host like a VM or container. Workflows must use trusted scripts,
+targets and repositories.
 
 ## Current limits
 

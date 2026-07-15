@@ -93,10 +93,16 @@ Optional properties:
 - \`systemPrompt: string\`
 - \`resume: AgentSession\` resumes a session in its original harness and location
 - \`maxTurns: number\`
+- \`outputSchema: OutputSchema\` requests an inferred, locally validated \`output\`
 
 Wrkflw translates reasoning separately for each harness. Claude rejects \`none\`
-and \`minimal\`. Cursor appends it to the model ID expected by its ACP server. Codex
-passes it as \`model_reasoning_effort\`.
+and \`minimal\`. Codex maps \`none\` to \`minimal\`, rejects \`max\`, and does not
+support \`maxTurns\`.
+
+\`outputSchema\` must implement Standard Schema and Standard JSON Schema; Zod 4
+schemas do. Wrkflw sends converted JSON Schema to the native SDK, validates the final
+value locally and returns it as inferred \`result.output\`. The validated value is
+also stored in the run archive. Invalid structured output fails the agent.
 `,
   locations: `# Locations
 
@@ -234,7 +240,7 @@ Follow detail levels:
 
 - \`summary\` emits workflow and agent lifecycle events
 - \`journal\` emits every stored event and transcript entry
-- \`raw\` emits the underlying AG-UI chunk for agent events
+- \`raw\` emits the underlying native SDK event for agent events
 
 Every line from \`follow\` is independent JSON.
 

@@ -1,4 +1,6 @@
-export const HARNESS_NAMES = ['claude-code', 'codex', 'cursor-acp'] as const
+import type { StandardJSONSchemaV1, StandardSchemaV1 } from '@standard-schema/spec'
+
+export const HARNESS_NAMES = ['claude-code', 'codex'] as const
 export type HarnessName = (typeof HARNESS_NAMES)[number]
 
 export const REASONING_LEVELS = [
@@ -74,7 +76,18 @@ export interface ManagedWorkspace {
   finalRevision?: string
 }
 
-export interface AgentRunOptions {
+export type OutputSchema<Input = unknown, Output = Input> = StandardSchemaV1<
+  Input,
+  Output
+> &
+  StandardJSONSchemaV1<Input, Output>
+
+export type SchemaOutput<Schema extends OutputSchema> =
+  StandardSchemaV1.InferOutput<Schema>
+
+export interface AgentRunOptions<
+  Schema extends OutputSchema | undefined = OutputSchema | undefined,
+> {
   /** Unique within one workflow. Used for status and event filtering. */
   id: string
   /** Exact model ID. Wrkflw never treats provider names as model aliases. */
@@ -88,9 +101,11 @@ export interface AgentRunOptions {
   /** Resume a previous turn in its original harness and resolved location. */
   resume?: AgentSession
   maxTurns?: number
+  /** Native JSON-schema output with local Standard Schema validation. */
+  outputSchema?: Schema
 }
 
-export interface AgentResult {
+export type AgentResult<Schema extends OutputSchema | undefined = undefined> = {
   id: string
   model: string
   harness: HarnessName
@@ -99,7 +114,7 @@ export interface AgentResult {
   workspace?: ManagedWorkspace
   text: string
   session?: AgentSession
-}
+} & (Schema extends OutputSchema ? { output: SchemaOutput<Schema> } : {})
 
 export interface PreflightResult {
   id: string
@@ -115,7 +130,9 @@ export interface WorkflowContext {
   /** Positional values after `wrkflw run workflow.ts name --`. */
   args: Array<string>
   /** Start one harness turn and wait for its result. */
-  run(options: AgentRunOptions): Promise<AgentResult>
+  run<Schema extends OutputSchema | undefined = undefined>(
+    options: AgentRunOptions<Schema>,
+  ): Promise<AgentResult<Schema>>
   /** Validate harnesses, directories and managed-workspace repositories. */
   preflight(options: ReadonlyArray<AgentRunOptions>): Promise<Array<PreflightResult>>
   /** Run independent operations concurrently and preserve input order. */
@@ -151,6 +168,7 @@ export interface AgentState {
   startedAt?: string
   finishedAt?: string
   session?: AgentSession
+  output?: unknown
   error?: string
   textChars: number
   eventCount: number
