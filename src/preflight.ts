@@ -5,7 +5,6 @@ import type { AgentRunOptions, HarnessName, PreflightResult, Target } from './ty
 const EXECUTABLES: Record<HarnessName, string> = {
   'claude-code': 'claude',
   codex: 'codex',
-  'cursor-acp': 'agent',
 }
 
 function targetLabel(target: Target): string {

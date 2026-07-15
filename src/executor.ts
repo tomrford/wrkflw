@@ -1,56 +1,24 @@
-import { EventType, chat } from '@tanstack/ai'
-import { readdir, unlink } from 'node:fs/promises'
-import { join } from 'node:path'
-import { defineSandbox, defineWorkspace, withSandbox } from '@tanstack/ai-sandbox'
-import { localProcessSandbox } from '@tanstack/ai-sandbox-local-process'
-import { buildAdapter, sessionEventName } from './harnesses.js'
+import { buildHarnessDriver } from './harnesses.js'
+import { isAbsolute } from 'node:path'
 import { preflightAgents } from './preflight.js'
-import { sshProcessSandbox } from './sandbox/ssh.js'
-import { assertCommandSuccess, executeTarget } from './target-command.js'
 import { HARNESS_NAMES, REASONING_LEVELS } from './types.js'
 import { createManagedWorkspace } from './workspaces.js'
-import type { StreamChunk } from '@tanstack/ai'
+import type { HarnessDriverFactory } from './harnesses.js'
 import type { RunStore } from './store.js'
 import type {
   AgentResult,
   AgentRunOptions,
   AgentSession,
   ManagedWorkspace,
+  OutputSchema,
   ResolvedLocation,
+  SchemaOutput,
   Target,
-  TranscriptEntry,
   WorkflowContext,
 } from './types.js'
 
-const SUBSCRIPTION_API_KEYS = ['ANTHROPIC_API_KEY', 'CODEX_API_KEY', 'OPENAI_API_KEY']
-
 function messageOf(error: unknown): string {
   return error instanceof Error ? error.message : String(error)
-}
-
-async function cleanupProjectionMarkers(cwd: string, target: Target): Promise<void> {
-  if (target.kind === 'ssh') {
-    const result = await executeTarget(
-      'sh',
-      [
-        '-c',
-        'for path in .tanstack-projected-*; do [ ! -e "$path" ] || rm -f -- "$path"; done',
-      ],
-      cwd,
-      target,
-    )
-    assertCommandSuccess(
-      result,
-      `Cannot clean projection markers in ${target.host}:${cwd}`,
-    )
-    return
-  }
-  const entries = await readdir(cwd)
-  await Promise.all(
-    entries
-      .filter((entry) => entry.startsWith('.tanstack-projected-'))
-      .map((entry) => unlink(join(cwd, entry))),
-  )
 }
 
 function resolvedLocation(target: Target, cwd: string): ResolvedLocation {
@@ -68,20 +36,12 @@ function sameLocation(left: ResolvedLocation, right: ResolvedLocation): boolean 
   return left.cwd === right.cwd && sameTarget(left.target, right.target)
 }
 
-function sessionIdFrom(chunk: StreamChunk, eventName: string): string | undefined {
-  if (chunk.type !== EventType.CUSTOM || chunk.name !== eventName) return undefined
-  if (chunk.value === null || typeof chunk.value !== 'object') return undefined
-  if (!('sessionId' in chunk.value)) return undefined
-  const sessionId = (chunk.value as { sessionId?: unknown }).sessionId
-  return typeof sessionId === 'string' ? sessionId : undefined
-}
-
 function validate(options: AgentRunOptions): void {
   if (!options.id.trim()) throw new Error('Agent run id is required')
   if (!options.model.trim())
     throw new Error(`Agent ${options.id} needs an exact model ID`)
   if (!options.prompt.trim()) throw new Error(`Agent ${options.id} needs a prompt`)
-  if (!HARNESS_NAMES.includes(options.harness)) {
+  if (!HARNESS_NAMES.includes(options.harness as (typeof HARNESS_NAMES)[number])) {
     throw new Error(`Agent ${options.id} has unsupported harness ${options.harness}`)
   }
   if (
@@ -102,8 +62,14 @@ function validate(options: AgentRunOptions): void {
   ) {
     throw new Error(`Agent ${options.id} sets worktreeRevision without worktree: true`)
   }
-  if (options.location?.target?.kind === 'ssh' && options.location.cwd === undefined) {
-    throw new Error(`Agent ${options.id} needs an explicit cwd for an SSH location`)
+  if (options.location?.target?.kind === 'ssh') {
+    const cwd = options.location.cwd
+    if (cwd === undefined) {
+      throw new Error(`Agent ${options.id} needs an explicit cwd for an SSH location`)
+    }
+    if (!isAbsolute(cwd)) {
+      throw new Error(`Agent ${options.id} needs an absolute cwd for an SSH location`)
+    }
   }
   if (options.resume !== undefined && options.resume.harness !== options.harness) {
     throw new Error(
@@ -117,69 +83,41 @@ function validate(options: AgentRunOptions): void {
   }
 }
 
-function stringValue(value: unknown): string {
-  if (typeof value === 'string') return value
-  if (value === undefined) return ''
-  return JSON.stringify(value)
+function formatPath(
+  path: ReadonlyArray<PropertyKey | { key: PropertyKey }> | undefined,
+) {
+  if (path === undefined || path.length === 0) return '$'
+  return `$${path
+    .map((segment) => {
+      const key = typeof segment === 'object' ? segment.key : segment
+      return typeof key === 'number' ? `[${key}]` : `.${String(key)}`
+    })
+    .join('')}`
 }
 
-function transcriptFromChunk(
-  agentId: string,
-  chunk: StreamChunk,
-): Omit<TranscriptEntry, 'seq' | 'at' | 'runId'> | null {
-  const data = chunk as unknown as Record<string, unknown>
-  const messageId =
-    typeof data.messageId === 'string'
-      ? data.messageId
-      : typeof data.toolCallId === 'string'
-        ? data.toolCallId
-        : undefined
-  const identified = messageId === undefined ? {} : { messageId }
-  switch (chunk.type) {
-    case EventType.TEXT_MESSAGE_CONTENT:
-      return { agentId, kind: 'assistant', content: chunk.delta, ...identified }
-    case EventType.REASONING_MESSAGE_CONTENT:
-      return {
-        agentId,
-        kind: 'reasoning',
-        content: stringValue(data.delta ?? data.content),
-        ...identified,
-      }
-    case EventType.TOOL_CALL_START:
-      return {
-        agentId,
-        kind: 'tool',
-        content: stringValue(data.toolCallName ?? data.toolName),
-        ...identified,
-        data: chunk,
-      }
-    case EventType.TOOL_CALL_ARGS:
-      return {
-        agentId,
-        kind: 'tool',
-        content: stringValue(data.delta ?? data.args),
-        ...identified,
-        data: chunk,
-      }
-    case EventType.TOOL_CALL_RESULT:
-      return {
-        agentId,
-        kind: 'tool-result',
-        content: stringValue(data.content ?? data.result),
-        ...identified,
-        data: chunk,
-      }
-    case EventType.RUN_ERROR:
-      return {
-        agentId,
-        kind: 'error',
-        content: chunk.message,
-        ...identified,
-        data: chunk,
-      }
-    default:
-      return null
+async function validateStructuredOutput<Schema extends OutputSchema>(
+  schema: Schema,
+  text: string,
+  nativeOutput: unknown,
+): Promise<SchemaOutput<Schema>> {
+  let candidate = nativeOutput
+  if (candidate === undefined) {
+    try {
+      candidate = JSON.parse(text)
+    } catch (error) {
+      throw new Error('Harness returned invalid JSON for structured output', {
+        cause: error,
+      })
+    }
   }
+  const result = await schema['~standard'].validate(candidate)
+  if (result.issues !== undefined) {
+    const details = result.issues
+      .map((issue) => `${formatPath(issue.path)}: ${issue.message}`)
+      .join('; ')
+    throw new Error(`Harness returned invalid structured output: ${details}`)
+  }
+  return result.value
 }
 
 export class WorkflowExecutor {
@@ -192,6 +130,7 @@ export class WorkflowExecutor {
     private readonly workflowCwd: string,
     private readonly args: Array<string>,
     private readonly store: RunStore,
+    private readonly driverFactory: HarnessDriverFactory = buildHarnessDriver,
   ) {}
 
   context(): WorkflowContext {
@@ -234,7 +173,9 @@ export class WorkflowExecutor {
     this.abortController.abort()
   }
 
-  private async runAgent(options: AgentRunOptions): Promise<AgentResult> {
+  private async runAgent<Schema extends OutputSchema | undefined = undefined>(
+    options: AgentRunOptions<Schema>,
+  ): Promise<AgentResult<Schema>> {
     validate(options)
     if (this.agentIds.has(options.id)) {
       throw new Error(`Agent run id ${JSON.stringify(options.id)} is already in use`)
@@ -324,6 +265,7 @@ export class WorkflowExecutor {
         state.status = 'succeeded'
         state.finishedAt = finishedAt
         if (result.session !== undefined) state.session = result.session
+        if ('output' in result) state.output = result.output
         state.textChars = result.text.length
       })
       await this.store.event(this.runId, {
@@ -352,92 +294,52 @@ export class WorkflowExecutor {
     }
   }
 
-  private async consume(
-    options: AgentRunOptions,
+  private async consume<Schema extends OutputSchema | undefined>(
+    options: AgentRunOptions<Schema>,
     target: Target,
     cwd: string,
     workspace: ManagedWorkspace | undefined,
-  ): Promise<AgentResult> {
-    const provider =
-      target.kind === 'local'
-        ? localProcessSandbox({ dir: cwd, scrubEnv: SUBSCRIPTION_API_KEYS })
-        : sshProcessSandbox({
-            host: target.host,
-            dir: cwd,
-            ...(target.sshArgs === undefined ? {} : { sshArgs: target.sshArgs }),
-            scrubEnv: SUBSCRIPTION_API_KEYS,
-          })
-
-    const sandbox = defineSandbox({
-      id: `${this.runId}-${options.id}`,
-      provider,
-      workspace: defineWorkspace({ source: { type: 'none' } }),
-      lifecycle: { reuse: 'thread' },
-    })
-    const adapter = buildAdapter(options)
-    const modelOptions = {
-      ...(options.resume === undefined ? {} : { sessionId: options.resume.id }),
-      ...(options.maxTurns === undefined ? {} : { maxTurns: options.maxTurns }),
-    }
-    const stream = chat({
-      adapter,
-      messages: [{ role: 'user', content: options.prompt }],
-      ...(options.systemPrompt === undefined
-        ? {}
-        : { systemPrompts: [options.systemPrompt] }),
-      modelOptions,
-      abortController: this.abortController,
-      middleware: [withSandbox(sandbox)],
-      threadId: `${this.runId}:${options.id}`,
-      runId: `${this.runId}:${options.id}:turn`,
-    })
-
-    let text = ''
-    let sessionId = options.resume?.id
-    try {
-      for await (const chunk of stream) {
+  ): Promise<AgentResult<Schema>> {
+    const driver = this.driverFactory(options, target, cwd, this.abortController.signal)
+    const harnessResult = await driver.run({
+      event: async (event) => {
         await this.store.event(this.runId, {
           type: 'agent.event',
           agentId: options.id,
-          data: chunk,
+          data: event,
         })
         await this.store.update(this.runId, (record) => {
           const state = record.agents[options.id]
           if (state !== undefined) state.eventCount += 1
         })
-        const transcript = transcriptFromChunk(options.id, chunk)
-        if (transcript !== null) {
-          await this.store.transcript(this.runId, transcript)
-        }
-        if (chunk.type === EventType.TEXT_MESSAGE_CONTENT) {
-          text += chunk.delta
-          await this.store.update(this.runId, (record) => {
-            const state = record.agents[options.id]
-            if (state !== undefined) state.textChars = text.length
-          })
-        }
-        sessionId = sessionIdFrom(chunk, sessionEventName(options.harness)) ?? sessionId
-        if (chunk.type === EventType.RUN_ERROR) {
-          throw new Error(chunk.message)
-        }
-      }
-    } finally {
-      await cleanupProjectionMarkers(cwd, target)
-    }
+      },
+      transcript: async (entry) => {
+        await this.store.transcript(this.runId, { agentId: options.id, ...entry })
+      },
+    })
 
     const location = resolvedLocation(target, cwd)
     const session: AgentSession | undefined =
-      sessionId === undefined
+      harnessResult.sessionId === undefined
         ? undefined
-        : { id: sessionId, harness: options.harness, location }
+        : { id: harnessResult.sessionId, harness: options.harness, location }
+    const output =
+      options.outputSchema === undefined
+        ? undefined
+        : await validateStructuredOutput(
+            options.outputSchema,
+            harnessResult.text,
+            harnessResult.structuredOutput,
+          )
     return {
       id: options.id,
       model: options.model,
       harness: options.harness,
       location,
       ...(workspace === undefined ? {} : { workspace }),
-      text,
+      text: harnessResult.text,
       ...(session === undefined ? {} : { session }),
-    }
+      ...(options.outputSchema === undefined ? {} : { output }),
+    } as AgentResult<Schema>
   }
 }

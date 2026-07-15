@@ -1,6 +1,12 @@
 import assert from 'node:assert/strict'
 import test from 'node:test'
-import { buildAdapter } from '../src/harnesses.js'
+import {
+  buildHarnessDriver,
+  codexTranscriptForTest,
+  linkedAbortControllerForTest,
+  needsClaudeResultTranscriptForTest,
+} from '../src/harnesses.js'
+import { subscriptionEnvironment } from '../src/harness-process.js'
 import type { AgentRunOptions } from '../src/types.js'
 
 function options(overrides: Partial<AgentRunOptions>): AgentRunOptions {
@@ -14,35 +20,74 @@ function options(overrides: Partial<AgentRunOptions>): AgentRunOptions {
   }
 }
 
-test('adapters retain exact model IDs', () => {
-  const adapter = buildAdapter(options({}))
-  assert.equal(adapter.model, 'gpt-5.6-luna')
+test('subscription environment removes API keys without removing user auth', () => {
+  assert.deepEqual(
+    subscriptionEnvironment({
+      ANTHROPIC_API_KEY: 'api-key',
+      CODEX_API_KEY: 'codex-key',
+      OPENAI_API_KEY: 'openai-key',
+      CLAUDE_CODE_OAUTH_TOKEN: 'subscription-token',
+      PATH: '/bin',
+    }),
+    {
+      CLAUDE_CODE_OAUTH_TOKEN: 'subscription-token',
+      PATH: '/bin',
+    },
+  )
 })
 
-test('Claude rejects reasoning levels its CLI does not expose', () => {
-  assert.throws(
-    () =>
-      buildAdapter(
-        options({
-          harness: 'claude-code',
-          model: 'claude-haiku-4-5',
-          reasoning: 'minimal',
-        }),
-      ),
+test('Claude rejects reasoning levels its SDK does not expose', async () => {
+  const driver = buildHarnessDriver(
+    options({
+      harness: 'claude-code',
+      model: 'claude-haiku-4-5',
+      reasoning: 'minimal',
+    }),
+    { kind: 'local' },
+    process.cwd(),
+    new AbortController().signal,
+  )
+  await assert.rejects(
+    driver.run({ event: async () => {}, transcript: async () => {} }),
     /does not support reasoning level minimal/,
   )
 })
 
-test('Cursor uses ACP with a reasoning-suffixed and shell-safe model ID', () => {
-  const adapter = buildAdapter(
-    options({
-      harness: 'cursor-acp',
-      model: "gpt-5.6-luna'preview",
-      reasoning: 'high',
-    }),
+test('Codex rejects unsupported max reasoning and turn limits', () => {
+  assert.throws(
+    () =>
+      buildHarnessDriver(
+        options({ reasoning: 'low', maxTurns: 1 }),
+        { kind: 'local' },
+        process.cwd(),
+        new AbortController().signal,
+      ),
+    /does not support maxTurns/,
   )
-  const harness = Reflect.get(adapter, 'harness') as {
-    command: (context: unknown) => string
-  }
-  assert.equal(harness.command({}), "agent --model 'gpt-5.6-luna'\\''preview-high' acp")
+})
+
+test('Codex completed messages normalize to readable transcript entries', () => {
+  assert.deepEqual(
+    codexTranscriptForTest({
+      type: 'item.completed',
+      item: { id: 'answer', type: 'agent_message', text: 'Readable answer' },
+    }),
+    { kind: 'assistant', content: 'Readable answer', messageId: 'answer' },
+  )
+})
+
+test('Claude archives structured result text when no assistant text carried it', () => {
+  assert.equal(needsClaudeResultTranscriptForTest(new Set(), '{"ok":true}'), true)
+  assert.equal(
+    needsClaudeResultTranscriptForTest(new Set(['{"ok":true}']), '{"ok":true}'),
+    false,
+  )
+})
+
+test('Claude links a workflow signal that is already aborted', () => {
+  const source = new AbortController()
+  source.abort(new Error('stopped'))
+  const linked = linkedAbortControllerForTest(source.signal)
+  assert.equal(linked.signal.aborted, true)
+  assert.equal(linked.signal.reason, source.signal.reason)
 })
