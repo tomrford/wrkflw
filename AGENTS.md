@@ -5,8 +5,8 @@ Claude Code, Codex CLI and Cursor Agent.
 
 ## Development
 
-- use the pinned pnpm version and Node.js 22 or newer
-- run `pnpm check` before handoff; it covers format, lint, types, tests, docs and build
+- use the pinned Bun version and Node.js 22 or newer
+- run `bun run check` before handoff; it covers format, lint, types, tests, docs and build
 - keep model IDs exact and keep harness, reasoning and location as separate choices
 - keep workflow control flow in TypeScript rather than adding a configuration format
 - preserve conservative Git cleanup and bookmark jj work before forgetting a workspace

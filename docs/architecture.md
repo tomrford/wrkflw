@@ -85,7 +85,9 @@ The transcript projection includes:
 of that same file. `transcript` filters by agent, kind and sequence range. `search`
 searches entry content and stored tool data in one run or all runs. `follow` tails the
 same journal that later inspection reads, advancing by byte offset rather than
-reparsing prior entries.
+reparsing prior entries. The text transcript projection coalesces adjacent assistant
+and reasoning deltas with the same message ID. JSON transcripts and the journal retain
+the original deltas and sequence numbers.
 
 ## Managed repository isolation
 

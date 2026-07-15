@@ -224,7 +224,8 @@ one stream.
 \`transcript\` supports \`--agent\`, \`--kind\`, \`--after\`, \`--before\`, \`--limit\`
 and \`--format json|text\`. Kinds are ${TRANSCRIPT_KINDS.map((kind) => `\`${kind}\``).join(', ')}.
 It stores user prompts, system prompts, assistant text, reasoning, tool calls, tool
-results and errors as numbered entries.
+results and errors as numbered entries. Text format coalesces streaming assistant and
+reasoning deltas by message; JSON retains every archived entry.
 
 \`search\` performs case-insensitive search over entry content and tool data. Use
 \`--all\` instead of a run name to search every stored run.

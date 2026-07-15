@@ -6,6 +6,7 @@ import { cleanupRunWorkspaces } from './cleanup.js'
 import { renderSkill, skillTopics } from './skill.js'
 import { RunStore, runDirectory } from './store.js'
 import { reconcileRun, reconcileRuns, startRun, stopRun } from './supervisor.js'
+import { formatTranscriptText, textTranscriptEntries } from './transcript.js'
 import { TRANSCRIPT_KINDS } from './types.js'
 import { runWorker } from './worker.js'
 import type {
@@ -315,15 +316,13 @@ async function transcriptCommand(store: RunStore, args: Array<string>): Promise<
     transcriptMatches(entry, filters),
   )
   const limit = numberOption(args, '--limit', { minimum: 1 })
-  if (limit !== undefined) entries = entries.slice(-limit)
   if ((option(args, '--format') ?? 'json') === 'text') {
-    for (const entry of entries) {
-      process.stdout.write(
-        `[${entry.seq}] ${entry.agentId} ${entry.kind}: ${entry.content}\n`,
-      )
-    }
+    let textEntries = textTranscriptEntries(entries)
+    if (limit !== undefined) textEntries = textEntries.slice(-limit)
+    process.stdout.write(formatTranscriptText(textEntries))
     return
   }
+  if (limit !== undefined) entries = entries.slice(-limit)
   json(entries)
 }
 

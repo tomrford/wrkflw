@@ -123,90 +123,98 @@ exec sh -c "$1"
   }
 })
 
-test('bookmarks a changed jj workspace before pruning', {
-  skip: !commandExists('jj'),
-}, async () => {
-  const parent = await mkdtemp(join(tmpdir(), 'wrkflw-jj-'))
-  const root = join(parent, 'repo')
-  const home = await mkdtemp(join(tmpdir(), 'wrkflw-home-'))
-  const previous = process.env.WRKFLW_HOME
-  process.env.WRKFLW_HOME = home
-  try {
-    execFileSync('jj', ['--config', 'signing.behavior="drop"', 'git', 'init', root])
-    const resolution = await createManagedWorkspace({
-      runId: '87654321-0000-0000-0000-000000000000',
-      runName: 'three-reviews',
-      agentId: 'review-two',
-      cwd: root,
-    })
-    const workspace = resolution.workspace
-    assert.ok(workspace)
-    assert.equal(workspace.kind, 'jj-workspace')
-    await writeFile(join(resolution.cwd, 'review.txt'), 'preserve me\n')
-    const pruned = await pruneManagedWorkspace(workspace)
-    assert.equal(pruned.pruned, true)
-    assert.match(pruned.bookmark ?? '', /^wrkflw\//)
-    const preserved = execFileSync(
-      'jj',
-      [
-        '--repository',
-        root,
-        'log',
-        '--no-graph',
-        '-r',
-        pruned.bookmark ?? '',
-        '-T',
-        'commit_id',
-      ],
-      { encoding: 'utf8' },
-    ).trim()
-    assert.equal(preserved, pruned.finalRevision)
-  } finally {
-    if (previous === undefined) delete process.env.WRKFLW_HOME
-    else process.env.WRKFLW_HOME = previous
-    await rm(parent, { recursive: true, force: true })
-    await rm(home, { recursive: true, force: true })
-  }
-})
+test(
+  'bookmarks a changed jj workspace before pruning',
+  {
+    skip: !commandExists('jj'),
+  },
+  async () => {
+    const parent = await mkdtemp(join(tmpdir(), 'wrkflw-jj-'))
+    const root = join(parent, 'repo')
+    const home = await mkdtemp(join(tmpdir(), 'wrkflw-home-'))
+    const previous = process.env.WRKFLW_HOME
+    process.env.WRKFLW_HOME = home
+    try {
+      execFileSync('jj', ['--config', 'signing.behavior="drop"', 'git', 'init', root])
+      const resolution = await createManagedWorkspace({
+        runId: '87654321-0000-0000-0000-000000000000',
+        runName: 'three-reviews',
+        agentId: 'review-two',
+        cwd: root,
+      })
+      const workspace = resolution.workspace
+      assert.ok(workspace)
+      assert.equal(workspace.kind, 'jj-workspace')
+      await writeFile(join(resolution.cwd, 'review.txt'), 'preserve me\n')
+      const pruned = await pruneManagedWorkspace(workspace)
+      assert.equal(pruned.pruned, true)
+      assert.match(pruned.bookmark ?? '', /^wrkflw\//)
+      const preserved = execFileSync(
+        'jj',
+        [
+          '--repository',
+          root,
+          'log',
+          '--no-graph',
+          '-r',
+          pruned.bookmark ?? '',
+          '-T',
+          'commit_id',
+        ],
+        { encoding: 'utf8' },
+      ).trim()
+      assert.equal(preserved, pruned.finalRevision)
+    } finally {
+      if (previous === undefined) delete process.env.WRKFLW_HOME
+      else process.env.WRKFLW_HOME = previous
+      await rm(parent, { recursive: true, force: true })
+      await rm(home, { recursive: true, force: true })
+    }
+  },
+)
 
-test('does not retain a bookmark for an unchanged jj workspace', {
-  skip: !commandExists('jj'),
-}, async () => {
-  const parent = await mkdtemp(join(tmpdir(), 'wrkflw-jj-clean-'))
-  const root = join(parent, 'repo')
-  const home = await mkdtemp(join(tmpdir(), 'wrkflw-home-'))
-  const previous = process.env.WRKFLW_HOME
-  process.env.WRKFLW_HOME = home
-  try {
-    execFileSync('jj', ['--config', 'signing.behavior="drop"', 'git', 'init', root])
-    const resolution = await createManagedWorkspace({
-      runId: '11223344-0000-0000-0000-000000000000',
-      runName: 'clean-review',
-      agentId: 'review',
-      cwd: root,
-    })
-    const workspace = resolution.workspace
-    assert.ok(workspace)
-    assert.equal(workspace.kind, 'jj-workspace')
+test(
+  'does not retain a bookmark for an unchanged jj workspace',
+  {
+    skip: !commandExists('jj'),
+  },
+  async () => {
+    const parent = await mkdtemp(join(tmpdir(), 'wrkflw-jj-clean-'))
+    const root = join(parent, 'repo')
+    const home = await mkdtemp(join(tmpdir(), 'wrkflw-home-'))
+    const previous = process.env.WRKFLW_HOME
+    process.env.WRKFLW_HOME = home
+    try {
+      execFileSync('jj', ['--config', 'signing.behavior="drop"', 'git', 'init', root])
+      const resolution = await createManagedWorkspace({
+        runId: '11223344-0000-0000-0000-000000000000',
+        runName: 'clean-review',
+        agentId: 'review',
+        cwd: root,
+      })
+      const workspace = resolution.workspace
+      assert.ok(workspace)
+      assert.equal(workspace.kind, 'jj-workspace')
 
-    const pruned = await pruneManagedWorkspace(workspace)
+      const pruned = await pruneManagedWorkspace(workspace)
 
-    assert.equal(pruned.pruned, true)
-    assert.equal(pruned.bookmark, undefined)
-    assert.equal(pruned.finalRevision, workspace.baseRevision)
-    const bookmarks = execFileSync(
-      'jj',
-      ['--repository', root, 'bookmark', 'list', '--all'],
-      { encoding: 'utf8' },
-    )
-    assert.doesNotMatch(bookmarks, /wrkflw\//)
-  } finally {
-    if (previous === undefined) delete process.env.WRKFLW_HOME
-    else process.env.WRKFLW_HOME = previous
-    await rm(parent, { recursive: true, force: true })
-    await rm(home, { recursive: true, force: true })
-  }
-})
+      assert.equal(pruned.pruned, true)
+      assert.equal(pruned.bookmark, undefined)
+      assert.equal(pruned.finalRevision, workspace.baseRevision)
+      const bookmarks = execFileSync(
+        'jj',
+        ['--repository', root, 'bookmark', 'list', '--all'],
+        { encoding: 'utf8' },
+      )
+      assert.doesNotMatch(bookmarks, /wrkflw\//)
+    } finally {
+      if (previous === undefined) delete process.env.WRKFLW_HOME
+      else process.env.WRKFLW_HOME = previous
+      await rm(parent, { recursive: true, force: true })
+      await rm(home, { recursive: true, force: true })
+    }
+  },
+)
 
 test('rejects worktree creation outside a repository', async () => {
   const directory = await mkdtemp(join(tmpdir(), 'wrkflw-plain-'))

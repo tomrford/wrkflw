@@ -19,16 +19,18 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v6
-      - uses: pnpm/action-setup@v4
+      - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: 1.3.13
       - uses: actions/setup-node@v6
         with:
           node-version: 24
           registry-url: https://registry.npmjs.org
           package-manager-cache: false
-      - run: pnpm install --frozen-lockfile
-      - run: pnpm check
+      - run: bun install --frozen-lockfile
+      - run: bun run check
       - name: Validate release version
         env:
           RELEASE_TAG: ${{ github.event.release.tag_name || inputs.tag }}
         run: test "$RELEASE_TAG" = "v$(node -p "require('./package.json').version")"
-      - run: pnpm publish --no-git-checks
+      - run: npm publish

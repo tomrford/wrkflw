@@ -38,11 +38,12 @@ export function buildAdapter(options: AgentRunOptions): AnyTextAdapter {
     }
     case 'codex': {
       const reasoning = options.reasoning === 'none' ? 'minimal' : options.reasoning
-      return codexText(options.model, {
-        ...(reasoning === undefined
+      return codexText(
+        options.model,
+        reasoning === undefined
           ? {}
-          : { config: { model_reasoning_effort: `"${reasoning}"` } }),
-      })
+          : { config: { model_reasoning_effort: `"${reasoning}"` } },
+      )
     }
     case 'cursor-acp': {
       const cursor = acpCompatible({

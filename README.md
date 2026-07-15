@@ -13,7 +13,7 @@ reasoning level and execution target are separate properties.
 Wrkflw requires Node.js 22 or newer:
 
 ```text
-pnpm add --global wrkflw
+bun add --global wrkflw
 ```
 
 ## Run a workflow
@@ -117,8 +117,9 @@ wrkflw search --all "model_reasoning_effort" --kind tool
 ```
 
 JSON is the default for agent callers. `follow` emits NDJSON so a caller can process
-the journal while the run is active. `journal` exposes the same ordered records after
-the run ends.
+the journal while the run is active. Text transcripts coalesce streaming assistant and
+reasoning deltas by message, while JSON and `journal` retain every archived entry.
+`journal` exposes the same ordered records after the run ends.
 
 ## Reuse locations
 
@@ -136,8 +137,8 @@ const repo: Location = {
 }
 
 await parallel([
-  run({ id: 'implementation', location: repo, /* agent properties */ }),
-  run({ id: 'review', location: repo, /* agent properties */ }),
+  run({ id: 'implementation', location: repo /* agent properties */ }),
+  run({ id: 'review', location: repo /* agent properties */ }),
 ])
 ```
 
@@ -296,11 +297,7 @@ Use `settle([...])` when the workflow needs every individual result without an
 exception:
 
 ```ts
-const outcomes = await settle([
-  run(first),
-  run(second),
-  run(third),
-])
+const outcomes = await settle([run(first), run(second), run(third)])
 ```
 
 Each outcome has `status: 'fulfilled'` with `value`, or `status: 'rejected'` with
@@ -349,9 +346,10 @@ and authentication boundaries.
 
 ## Develop Wrkflw
 
-Use the pinned pnpm version. The full gate checks formatting, lint, types, tests,
-documentation and the production build:
+Use the pinned Bun version. The full gate uses Oxfmt and Oxlint, then checks types,
+tests, documentation and the production build:
 
 ```text
-pnpm check
+bun install --frozen-lockfile
+bun run check
 ```
