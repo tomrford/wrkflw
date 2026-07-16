@@ -259,6 +259,40 @@ function transcriptFromCodexItem(item: ThreadItem): HarnessTranscript | undefine
   }
 }
 
+async function consumeCodexEvents(
+  events: AsyncIterable<ThreadEvent>,
+  sink: HarnessSink,
+  initialSessionId?: string,
+): Promise<HarnessResult> {
+  let text: string | undefined
+  let sessionId = initialSessionId
+  for await (const event of events) {
+    await sink.event(event)
+    if (event.type === 'thread.started') sessionId = event.thread_id
+    if (event.type === 'turn.failed' || event.type === 'error') {
+      throw new Error(
+        event.type === 'turn.failed' ? event.error.message : event.message,
+      )
+    }
+    if (
+      event.type === 'item.started' &&
+      (event.item.type === 'command_execution' ||
+        event.item.type === 'mcp_tool_call' ||
+        event.item.type === 'web_search')
+    ) {
+      const transcript = transcriptFromCodexItem(event.item)
+      if (transcript !== undefined) await sink.transcript(transcript)
+    }
+    if (event.type === 'item.completed') {
+      const transcript = transcriptFromCodexItem(event.item)
+      if (transcript !== undefined) await sink.transcript(transcript)
+      if (event.item.type === 'agent_message') text = event.item.text
+    }
+  }
+  if (text === undefined) throw new Error('Codex ended without an agent message')
+  return { text, ...(sessionId === undefined ? {} : { sessionId }) }
+}
+
 function codexDriver(
   options: AgentRunOptions,
   target: Target,
@@ -300,32 +334,7 @@ function codexDriver(
                 }),
               }),
         })
-        let text = ''
-        let sessionId = options.resume?.id
-        for await (const event of streamed.events) {
-          await sink.event(event)
-          if (event.type === 'thread.started') sessionId = event.thread_id
-          if (event.type === 'turn.failed' || event.type === 'error') {
-            throw new Error(
-              event.type === 'turn.failed' ? event.error.message : event.message,
-            )
-          }
-          if (
-            event.type === 'item.started' &&
-            (event.item.type === 'command_execution' ||
-              event.item.type === 'mcp_tool_call' ||
-              event.item.type === 'web_search')
-          ) {
-            const transcript = transcriptFromCodexItem(event.item)
-            if (transcript !== undefined) await sink.transcript(transcript)
-          }
-          if (event.type === 'item.completed') {
-            const transcript = transcriptFromCodexItem(event.item)
-            if (transcript !== undefined) await sink.transcript(transcript)
-            if (event.item.type === 'agent_message') text = event.item.text
-          }
-        }
-        return { text, ...(sessionId === undefined ? {} : { sessionId }) }
+        return consumeCodexEvents(streamed.events, sink, options.resume?.id)
       } finally {
         await shim?.cleanup()
       }
@@ -357,3 +366,4 @@ export const codexTranscriptForTest = (
 
 export const needsClaudeResultTranscriptForTest = needsClaudeResultTranscript
 export const linkedAbortControllerForTest = linkedAbortController
+export const consumeCodexEventsForTest = consumeCodexEvents

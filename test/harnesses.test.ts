@@ -3,6 +3,7 @@ import test from 'node:test'
 import {
   buildHarnessDriver,
   codexTranscriptForTest,
+  consumeCodexEventsForTest,
   linkedAbortControllerForTest,
   needsClaudeResultTranscriptForTest,
 } from '../src/harnesses.js'
@@ -73,6 +74,30 @@ test('Codex completed messages normalize to readable transcript entries', () => 
       item: { id: 'answer', type: 'agent_message', text: 'Readable answer' },
     }),
     { kind: 'assistant', content: 'Readable answer', messageId: 'answer' },
+  )
+})
+
+test('Codex rejects a completed turn without an agent message', async () => {
+  async function* events() {
+    yield { type: 'turn.started' } as const
+    yield {
+      type: 'turn.completed',
+      usage: {
+        input_tokens: 1,
+        cached_input_tokens: 0,
+        output_tokens: 0,
+        reasoning_output_tokens: 0,
+      },
+    } as const
+  }
+
+  await assert.rejects(
+    consumeCodexEventsForTest(
+      events(),
+      { event: async () => {}, transcript: async () => {} },
+      undefined,
+    ),
+    /Codex ended without an agent message/,
   )
 })
 
